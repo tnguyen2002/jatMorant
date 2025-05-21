@@ -4,9 +4,15 @@ import torch
 from torch.utils.data import DataLoader
 import os
 import sys
+import numpy as np  # Added for percentile calculation
+import argparse
 
 # Add path to reward function
 sys.path.append(os.path.join(os.path.dirname(__file__), "utils"))
+
+# Global flag to determine which datasets to load
+# Can be overridden via command line or by setting directly
+TASK_MODE = "sft"  # Options: "sft", "dpo", "rloo", "all"
 
 # Load tokenizer (used for both)
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -18,6 +24,32 @@ def flatten_messages(messages):
     if isinstance(messages, list) and len(messages) > 0 and isinstance(messages[0], dict):
         return "\n".join([msg["content"] for msg in messages])
     return messages  # Return as is if not in expected format
+
+# Function to calculate the 95th percentile token length
+def calculate_95th_percentile_length(dataset):
+    print("Calculating 95th percentile token length for SmolTalk dataset...")
+    lengths = []
+    sample_size = min(len(dataset), 1000)  # Sample to speed up calculation
+    for idx in range(sample_size):
+        example = dataset[idx]
+        if "messages" in example and len(example["messages"]) >= 2:
+            # Get user prompt
+            user_message = example["messages"][0]["content"] if example["messages"][0]["role"] == "user" else ""
+            # Get response
+            assistant_message = example["messages"][1]["content"] if example["messages"][1]["role"] == "assistant" else ""
+            
+            # Calculate token lengths
+            full_text = user_message + "\n" + assistant_message
+            tokens = tokenizer(full_text, add_special_tokens=True)["input_ids"]
+            lengths.append(len(tokens))
+    
+    if not lengths:
+        print("Warning: Could not calculate token lengths, defaulting to 512")
+        return 512
+    
+    percentile_95 = int(np.percentile(lengths, 95))
+    print(f"95th percentile token length: {percentile_95}")
+    return percentile_95
 
 # Tokenization function for preference datasets (e.g., UltraFeedback)
 def tokenize_ultrafeedback(example):
@@ -58,7 +90,8 @@ def tokenize_ultrafeedback(example):
 
 # Tokenization for SmolTalk SFT dataset
 # Modified to extract only the first user and assistant message from each conversation
-def tokenize_smoltalk(example):
+# and truncate from the completion side while using the 95th percentile length
+def tokenize_smoltalk(example, max_seq_length):
     # SmolTalk dataset contains a list of messages in the 'messages' field
     # Each message has 'content' and 'role' fields
     # We want to extract only the first user and assistant message
@@ -76,34 +109,55 @@ def tokenize_smoltalk(example):
         prompt = example.get("prompt", example.get("instruction", ""))
         response = example.get("response", example.get("output", ""))
     
-    # Combine prompt and response
-    full_text = prompt + "\n" + response
-    
-    # Get the token length of the prompt to create the loss mask
+    # Tokenize prompt (we preserve this completely)
     prompt_tokens = tokenizer(prompt, add_special_tokens=True)["input_ids"]
     prompt_len = len(prompt_tokens)
     
-    # Tokenize the full text
-    tokens = tokenizer(full_text, truncation=True, padding="max_length", max_length=512)
+    # Calculate remaining tokens for response
+    response_max_len = max_seq_length - prompt_len
+    response_max_len = max(0, response_max_len)  # Ensure it's not negative
     
-    # Create a loss mask that masks out the prompt tokens
-    loss_mask = tokens["attention_mask"].copy()
-    for i in range(prompt_len):
-        if i < len(loss_mask):
-            loss_mask[i] = 0
+    # Tokenize response with truncation
+    response_tokens = tokenizer(response, add_special_tokens=False)["input_ids"]
+    if len(response_tokens) > response_max_len:
+        response_tokens = response_tokens[:response_max_len]
+    
+    # Combine into full sequence
+    input_ids = prompt_tokens + response_tokens
+    
+    # Create attention mask
+    attention_mask = [1] * len(input_ids)
+    
+    # Pad to max_length
+    padding_length = max_seq_length - len(input_ids)
+    if padding_length > 0:
+        input_ids = input_ids + [tokenizer.pad_token_id] * padding_length
+        attention_mask = attention_mask + [0] * padding_length
+    
+    # Create loss mask (0 for prompt tokens, 1 for response tokens)
+    loss_mask = [0] * prompt_len + [1] * min(len(response_tokens), max_seq_length - prompt_len)
+    loss_mask = loss_mask + [0] * max(0, max_seq_length - len(loss_mask))
     
     return {
         "prompt": prompt,
         "response": response,
-        "input_ids": tokens["input_ids"],
-        "attention_mask": tokens["attention_mask"],
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
         "loss_mask": loss_mask
     }
 
 # Tokenization for verifier-based datasets (e.g., Countdown)
 def tokenize_countdown(example):
-    prompt = example["prompt"]
-    completion = example["completion"] if "completion" in example else ""
+    # Check if we have "prompt" or "query" field
+    if "prompt" in example:
+        prompt = example["prompt"]
+    elif "query" in example:
+        prompt = example["query"]
+    else:
+        prompt = ""  # Fallback
+    
+    # Check if we have "completion" field
+    completion = example.get("completion", "")
     
     # Tokenize prompt separately to get its length
     prompt_tokens = tokenizer(prompt, add_special_tokens=True)["input_ids"]
@@ -128,7 +182,9 @@ def tokenize_countdown(example):
         "verifier_score": example.get("verifier_score", 0.0)  # if exists
     }
 
-# Create PyTorch Dataset class for easier batch processing
+# Dataset Classes
+
+# For SFT
 class SFTDataset(torch.utils.data.Dataset):
     def __init__(self, tokenized_dataset):
         self.data = tokenized_dataset
@@ -144,6 +200,7 @@ class SFTDataset(torch.utils.data.Dataset):
             "loss_mask": torch.tensor(item["loss_mask"])
         }
 
+# For DPO
 class PreferenceDataset(torch.utils.data.Dataset):
     def __init__(self, tokenized_dataset):
         self.data = tokenized_dataset
@@ -163,6 +220,7 @@ class PreferenceDataset(torch.utils.data.Dataset):
             "rejected_loss_mask": torch.tensor(item["rejected_loss_mask"])
         }
 
+# For RLOO
 class CountdownPromptsDataset(torch.utils.data.Dataset):
     def __init__(self, tokenized_dataset):
         self.data = tokenized_dataset
@@ -178,86 +236,137 @@ class CountdownPromptsDataset(torch.utils.data.Dataset):
             "attention_mask": torch.tensor(item["attention_mask"])
         }
 
-# Load datasets
-print("Loading datasets...")
+# Dataset loaders
+def load_sft_datasets():
+    """Load datasets needed for SFT"""
+    datasets = {}
+    
+    # 1. SmolTalk dataset for SFT - extract only first user-assistant pair from each conversation
+    try:
+        print("Loading SmolTalk dataset...")
+        smoltalk = load_dataset("HuggingFaceTB/smol-smoltalk", split="train")
+        print(f"SmolTalk dataset loaded with {len(smoltalk)} examples")
+        
+        # Calculate 95th percentile token length
+        max_seq_length = calculate_95th_percentile_length(smoltalk)
+        
+        # Apply tokenization with the calculated max_seq_length
+        print(f"Processing SmolTalk dataset with max sequence length of {max_seq_length}...")
+        
+        # Using a function to include max_seq_length
+        def tokenize_smoltalk_with_length(example):
+            return tokenize_smoltalk(example, max_seq_length)
+        
+        smoltalk_tokenized = smoltalk.map(tokenize_smoltalk_with_length, batched=False)
+        datasets["smoltalk"] = SFTDataset(smoltalk_tokenized)
+        print(f"SmolTalk dataset processed with {len(datasets['smoltalk'])} examples, using only first user-assistant pair")
+    except Exception as e:
+        print(f"Error loading SmolTalk dataset: {e}")
+    
+    # 2. WarmStart dataset for SFT (Countdown)
+    try:
+        print("Loading WarmStart dataset...")
+        warmstart = load_dataset("Asap7772/cog_behav_all_strategies", split="train")
+        
+        # Let's print the column names to debug
+        print(f"WarmStart dataset columns: {warmstart.column_names}")
+        
+        # Map dataset with the updated tokenize_countdown function
+        warmstart_tokenized = warmstart.map(tokenize_countdown, batched=False)
+        datasets["warmstart"] = SFTDataset(warmstart_tokenized)
+        print(f"WarmStart dataset loaded with {len(datasets['warmstart'])} examples")
+    except Exception as e:
+        print(f"Error loading WarmStart dataset: {e}")
+    
+    return datasets
 
-# 1. SmolTalk dataset for SFT - extract only first user-assistant pair from each conversation
-try:
-    print("Loading SmolTalk dataset...")
-    smoltalk = load_dataset("HuggingFaceTB/smol-smoltalk", split="train")
-    print(f"Processing SmolTalk dataset with {len(smoltalk)} examples...")
-    smoltalk_tokenized = smoltalk.map(tokenize_smoltalk, batched=False)
-    smoltalk_dataset = SFTDataset(smoltalk_tokenized)
-    print(f"SmolTalk dataset loaded with {len(smoltalk_dataset)} examples, using only first user-assistant pair")
-except Exception as e:
-    print(f"Error loading SmolTalk dataset: {e}")
-    smoltalk_dataset = None
+def load_dpo_datasets():
+    """Load datasets needed for DPO"""
+    datasets = {}
+    
+    # UltraFeedback preference dataset for DPO
+    try:
+        print("Loading UltraFeedback dataset...")
+        ultrafeedback = load_dataset("HuggingFaceH4/ultrafeedback_binarized", split="train_prefs")
+        ultrafeedback_tokenized = ultrafeedback.map(tokenize_ultrafeedback, batched=False)
+        datasets["ultrafeedback"] = PreferenceDataset(ultrafeedback_tokenized)
+        print(f"UltraFeedback dataset loaded with {len(datasets['ultrafeedback'])} examples")
+    except Exception as e:
+        print(f"Error loading UltraFeedback dataset: {e}")
+    
+    return datasets
 
-# 2. UltraFeedback preference dataset for DPO
-try:
-    ultrafeedback = load_dataset("HuggingFaceH4/ultrafeedback_binarized", split="train_prefs")
-    ultrafeedback_tokenized = ultrafeedback.map(tokenize_ultrafeedback, batched=False)
-    ultrafeedback_dataset = PreferenceDataset(ultrafeedback_tokenized)
-    print(f"UltraFeedback dataset loaded with {len(ultrafeedback_dataset)} examples")
-except Exception as e:
-    print(f"Error loading UltraFeedback dataset: {e}")
-    ultrafeedback_dataset = None
+def load_rloo_datasets():
+    """Load datasets needed for RLOO"""
+    datasets = {}
+    
+    # Prompts dataset for RLOO
+    try:
+        print("Loading Countdown prompts dataset...")
+        countdown_prompts = load_dataset("Jiayi-Pan/Countdown-Tasks-3to4", split="train")
+        countdown_prompts_tokenized = countdown_prompts.map(
+            lambda x: {"prompt": x["prompt"], "input_ids": [], "attention_mask": []}, 
+            batched=False
+        )
+        countdown_prompts_tokenized = countdown_prompts_tokenized.map(tokenize_countdown, batched=False)
+        datasets["countdown_prompts"] = CountdownPromptsDataset(countdown_prompts_tokenized)
+        print(f"Countdown prompts dataset loaded with {len(datasets['countdown_prompts'])} examples")
+    except Exception as e:
+        print(f"Error loading Countdown prompts dataset: {e}")
+    
+    return datasets
 
-# 3. WarmStart dataset for SFT (Countdown)
-try:
-    warmstart = load_dataset("Asap7772/cog_behav_all_strategies", split="train")
-    warmstart_tokenized = warmstart.map(tokenize_countdown, batched=False)
-    warmstart_dataset = SFTDataset(warmstart_tokenized)
-    print(f"WarmStart dataset loaded with {len(warmstart_dataset)} examples")
-except Exception as e:
-    print(f"Error loading WarmStart dataset: {e}")
-    warmstart_dataset = None
-
-# 4. Prompts dataset for RLOO
-try:
-    countdown_prompts = load_dataset("Jiayi-Pan/Countdown-Tasks-3to4", split="train")
-    countdown_prompts_tokenized = countdown_prompts.map(
-        lambda x: {"prompt": x["prompt"], "input_ids": [], "attention_mask": []}, 
-        batched=False
-    )
-    countdown_prompts_tokenized = countdown_prompts_tokenized.map(tokenize_countdown, batched=False)
-    countdown_prompts_dataset = CountdownPromptsDataset(countdown_prompts_tokenized)
-    print(f"Countdown prompts dataset loaded with {len(countdown_prompts_dataset)} examples")
-except Exception as e:
-    print(f"Error loading Countdown prompts dataset: {e}")
-    countdown_prompts_dataset = None
+# Main function to load all datasets based on task mode
+def load_datasets(task_mode=None):
+    """
+    Load datasets based on the task mode
+    
+    Args:
+        task_mode: Which datasets to load. Options: "sft", "dpo", "rloo", "all"
+                  If None, use the global TASK_MODE.
+    
+    Returns:
+        Dictionary of datasets
+    """
+    global TASK_MODE
+    mode = task_mode or TASK_MODE
+    print(f"Loading datasets for task mode: {mode}")
+    
+    all_datasets = {}
+    
+    if mode in ["sft", "all"]:
+        sft_datasets = load_sft_datasets()
+        all_datasets.update(sft_datasets)
+    
+    if mode in ["dpo", "all"]:
+        dpo_datasets = load_dpo_datasets()
+        all_datasets.update(dpo_datasets)
+    
+    if mode in ["rloo", "all"]:
+        rloo_datasets = load_rloo_datasets()
+        all_datasets.update(rloo_datasets)
+    
+    return all_datasets
 
 # Create DataLoaders
-def get_dataloaders(batch_size=8):
+def get_dataloaders(batch_size=8, task_mode=None):
+    """
+    Create DataLoader objects for the loaded datasets
+    
+    Args:
+        batch_size: Batch size for the DataLoaders
+        task_mode: Which datasets to load. Options: "sft", "dpo", "rloo", "all"
+                  If None, use the global TASK_MODE.
+    
+    Returns:
+        Dictionary of DataLoader objects
+    """
+    datasets = load_datasets(task_mode)
     dataloaders = {}
     
-    if smoltalk_dataset:
-        dataloaders["smoltalk"] = DataLoader(
-            smoltalk_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            pin_memory=True
-        )
-    
-    if ultrafeedback_dataset:
-        dataloaders["ultrafeedback"] = DataLoader(
-            ultrafeedback_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            pin_memory=True
-        )
-    
-    if warmstart_dataset:
-        dataloaders["warmstart"] = DataLoader(
-            warmstart_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            pin_memory=True
-        )
-    
-    if countdown_prompts_dataset:
-        dataloaders["countdown_prompts"] = DataLoader(
-            countdown_prompts_dataset,
+    for name, dataset in datasets.items():
+        dataloaders[name] = DataLoader(
+            dataset,
             batch_size=batch_size,
             shuffle=True,
             pin_memory=True
@@ -347,9 +456,23 @@ def create_dpo_dataset(sft_model, tokenizer, prompts_dataset, temperature=0.7, t
     """
     return None
 
+# Parse command line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description='Data loading script')
+    parser.add_argument('--task', type=str, default=TASK_MODE, 
+                        choices=['sft', 'dpo', 'rloo', 'all'],
+                        help='Task mode to determine which datasets to load')
+    parser.add_argument('--batch_size', type=int, default=8,
+                        help='Batch size for DataLoaders')
+    return parser.parse_args()
+
 if __name__ == "__main__":
+    # Parse arguments if running as script
+    args = parse_args()
+    TASK_MODE = args.task
+    
     # Test loading the datasets
-    dataloaders = get_dataloaders(batch_size=4)
+    dataloaders = get_dataloaders(batch_size=args.batch_size)
     
     # Print sample from each dataset
     for name, loader in dataloaders.items():
