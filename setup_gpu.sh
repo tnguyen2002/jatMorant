@@ -4,18 +4,43 @@
 
 # Check if conda is installed
 if ! command -v conda &> /dev/null; then
-    echo "conda is not installed. Please install miniconda or anaconda first."
-    exit 1
+    echo "Conda is not installed. Installing miniconda..."
+    
+    # Download Miniconda installer
+    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    chmod +x Miniconda3-latest-Linux-x86_64.sh
+    
+    # Install Miniconda
+    ./Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda
+    
+    # Add to PATH and initialize
+    export PATH="$HOME/miniconda/bin:$PATH"
+    
+    # Initialize conda for bash
+    $HOME/miniconda/bin/conda init bash
+    
+    # Source bashrc to apply changes
+    source ~/.bashrc
+    
+    # Install necessary system packages
+    echo "Installing system dependencies..."
+    sudo apt update
+    sudo apt install -y g++ make swig
+    
+    echo "Conda installation complete!"
 fi
+
+# Make sure conda commands are available in this script
+export PATH="$HOME/miniconda/bin:$PATH"
+source $(conda info --base)/etc/profile.d/conda.sh
 
 # Create conda environment from environment.yml
 echo "Creating conda environment from environment.yml..."
-conda env create -f environment.yml
+conda env create -f environment.yml || conda env update -f environment.yml
 
 # Activate environment
 echo "Activating conda environment..."
-source $(conda info --base)/etc/profile.d/conda.sh
-conda activate sft-env
+conda activate cs224r-env  # Using name from environment.yml
 
 # Check if CUDA is available
 echo "Checking CUDA availability..."
