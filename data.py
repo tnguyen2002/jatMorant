@@ -57,9 +57,24 @@ def tokenize_ultrafeedback(example):
     }
 
 # Tokenization for SmolTalk SFT dataset
+# Modified to extract only the first user and assistant message from each conversation
 def tokenize_smoltalk(example):
-    prompt = example["prompt"] if "prompt" in example else example["instruction"]
-    response = example["response"] if "response" in example else example["output"]
+    # SmolTalk dataset contains a list of messages in the 'messages' field
+    # Each message has 'content' and 'role' fields
+    # We want to extract only the first user and assistant message
+    
+    if "messages" in example and isinstance(example["messages"], list) and len(example["messages"]) >= 2:
+        # In the SmolTalk dataset, typically the first message is from user (index 0)
+        # and the second message is from assistant (index 1)
+        user_message = example["messages"][0]["content"] if example["messages"][0]["role"] == "user" else ""
+        assistant_message = example["messages"][1]["content"] if example["messages"][1]["role"] == "assistant" else ""
+        
+        prompt = user_message
+        response = assistant_message
+    else:
+        # Fallback to the original fields if messages field doesn't exist or has unexpected format
+        prompt = example.get("prompt", example.get("instruction", ""))
+        response = example.get("response", example.get("output", ""))
     
     # Combine prompt and response
     full_text = prompt + "\n" + response
@@ -166,12 +181,14 @@ class CountdownPromptsDataset(torch.utils.data.Dataset):
 # Load datasets
 print("Loading datasets...")
 
-# 1. SmolTalk dataset for SFT
+# 1. SmolTalk dataset for SFT - extract only first user-assistant pair from each conversation
 try:
+    print("Loading SmolTalk dataset...")
     smoltalk = load_dataset("HuggingFaceTB/smol-smoltalk", split="train")
+    print(f"Processing SmolTalk dataset with {len(smoltalk)} examples...")
     smoltalk_tokenized = smoltalk.map(tokenize_smoltalk, batched=False)
     smoltalk_dataset = SFTDataset(smoltalk_tokenized)
-    print(f"SmolTalk dataset loaded with {len(smoltalk_dataset)} examples")
+    print(f"SmolTalk dataset loaded with {len(smoltalk_dataset)} examples, using only first user-assistant pair")
 except Exception as e:
     print(f"Error loading SmolTalk dataset: {e}")
     smoltalk_dataset = None
