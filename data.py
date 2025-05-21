@@ -2,7 +2,7 @@ from datasets import load_dataset, DatasetDict
 from transformers import AutoTokenizer
 
 # Load tokenizer (used for both)
-tokenizer = AutoTokenizer.from_pretrained("gpt2")
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
 tokenizer.pad_token = tokenizer.eos_token
 
 
