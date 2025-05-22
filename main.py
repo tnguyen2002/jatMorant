@@ -91,10 +91,13 @@ def main():
                     num_train_epochs=args.num_epochs,
                     output_dir=sft_output_dir,
                     use_wandb=args.use_wandb,
-                    validation_dataloader=dataloaders["smoltalk_val"],
-                    validation_steps=100,
+                    eval_every=100,  # Evaluate every 100 steps
                 )
-                sft_trainer.train(dataloaders["smoltalk_train"])
+                # Pass validation dataloader to the train method
+                sft_trainer.train(
+                    train_dataloader=dataloaders["smoltalk_train"],
+                    eval_dataloader=dataloaders["smoltalk_val"]
+                )
             
             # Train SFT with the Warmstart dataset for Countdown
             if "warmstart" in dataloaders and (args.dataset is None or args.dataset == "warmstart"):
