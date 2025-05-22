@@ -91,7 +91,7 @@ def main():
                     num_train_epochs=args.num_epochs,
                     output_dir=os.path.join(sft_output_dir, "best_model"),
                     use_wandb=args.use_wandb,
-                    eval_every=100,  # Evaluate every 100 steps
+                    eval_every=2000, 
                 )
                 # Pass validation dataloader to the train method
                 sft_trainer.train(
