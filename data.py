@@ -332,19 +332,19 @@ def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024, tr
         max_samples: Maximum number of samples to use per dataset (for memory constraints)
         max_length: Maximum sequence length for all examples
         train_ratio: Ratio of the full dataset to use for training (0.1 = 10%)
-        val_split: Ratio of the training data to use for validation
+        val_split: Ratio of the training data to use for validation (not used when using test split)
     """
     datasets = {}
     
     # 1. SmolTalk dataset for SFT
     try:
         # Set cache name based on parameters to ensure we don't mix different configurations
-        dataset_cache_name = f"smoltalk_ratio{train_ratio}_val{val_split}"
+        dataset_cache_name = f"smoltalk_ratio{train_ratio}"
         
         # Try to load from disk cache first
         if not force_refresh:
             cached_dataset_train = load_dataset_from_disk("sft", f"{dataset_cache_name}_train")
-            cached_dataset_val = load_dataset_from_disk("sft", f"{dataset_cache_name}_val")
+            cached_dataset_val = load_dataset_from_disk("sft", f"{dataset_cache_name}_test")
             if cached_dataset_train is not None and cached_dataset_val is not None:
                 datasets["smoltalk_train"] = cached_dataset_train
                 datasets["smoltalk_val"] = cached_dataset_val
@@ -352,14 +352,17 @@ def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024, tr
         # If not in cache or force_refresh, process from scratch
         if "smoltalk_train" not in datasets or "smoltalk_val" not in datasets:
             print("Loading SmolTalk dataset...")
-            smoltalk = load_dataset("HuggingFaceTB/smol-smoltalk", split="train")
-            print(f"SmolTalk dataset loaded with {len(smoltalk)} examples")
+            # Load both train and test splits
+            smoltalk_train = load_dataset("HuggingFaceTB/smol-smoltalk", split="train")
+            smoltalk_test = load_dataset("HuggingFaceTB/smol-smoltalk", split="test")
             
-            # Apply train ratio to limit dataset size
+            print(f"SmolTalk dataset loaded with {len(smoltalk_train)} training examples and {len(smoltalk_test)} test examples")
+            
+            # Apply train ratio to limit dataset size if needed
             if train_ratio < 1.0:
-                total_samples = len(smoltalk)
+                total_samples = len(smoltalk_train)
                 num_samples = int(total_samples * train_ratio)
-                print(f"Using {train_ratio*100:.1f}% of SmolTalk data: {num_samples} examples")
+                print(f"Using {train_ratio*100:.1f}% of SmolTalk training data: {num_samples} examples")
                 
                 # Override max_samples if smaller than the ratio-limited sample count
                 if max_samples is not None:
@@ -370,22 +373,17 @@ def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024, tr
                 import random
                 random.seed(42)  # For reproducibility
                 indices = random.sample(range(total_samples), num_samples)
-                smoltalk = smoltalk.select(indices)
-            # If not using train_ratio but using max_samples
-            elif max_samples and len(smoltalk) > max_samples:
-                print(f"Limiting SmolTalk dataset to {max_samples} examples")
-                smoltalk = smoltalk.select(range(max_samples))
+                smoltalk_train = smoltalk_train.select(indices)
+            # If not using train_ratio but using max_samples for train
+            elif max_samples and len(smoltalk_train) > max_samples:
+                print(f"Limiting SmolTalk training dataset to {max_samples} examples")
+                smoltalk_train = smoltalk_train.select(range(max_samples))
             
-            # Split into train and validation
-            val_size = int(len(smoltalk) * val_split)
-            train_size = len(smoltalk) - val_size
-            
-            # Create splits
-            train_val_split = smoltalk.train_test_split(test_size=val_size, train_size=train_size, seed=42)
-            smoltalk_train = train_val_split['train']
-            smoltalk_val = train_val_split['test']
-            
-            print(f"Split into {len(smoltalk_train)} training and {len(smoltalk_val)} validation examples")
+            # Limit test set size if needed (usually much smaller than train)
+            test_max_samples = max(1000, int(max_samples * 0.1)) if max_samples else None
+            if test_max_samples and len(smoltalk_test) > test_max_samples:
+                print(f"Limiting SmolTalk test dataset to {test_max_samples} examples")
+                smoltalk_test = smoltalk_test.select(range(test_max_samples))
             
             print("Processing SmolTalk dataset with input=256 tokens, output=1024 tokens")
             
@@ -394,14 +392,14 @@ def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024, tr
             datasets["smoltalk_train"] = SFTDataset(smoltalk_train_tokenized, max_length=max_length)
             print(f"SmolTalk train dataset processed with {len(datasets['smoltalk_train'])} examples")
             
-            # Process the validation dataset
-            smoltalk_val_tokenized = smoltalk_val.map(tokenize_smoltalk, batched=False)
-            datasets["smoltalk_val"] = SFTDataset(smoltalk_val_tokenized, max_length=max_length)
-            print(f"SmolTalk validation dataset processed with {len(datasets['smoltalk_val'])} examples")
+            # Process the test dataset for validation
+            smoltalk_test_tokenized = smoltalk_test.map(tokenize_smoltalk, batched=False)
+            datasets["smoltalk_val"] = SFTDataset(smoltalk_test_tokenized, max_length=max_length)
+            print(f"SmolTalk test dataset (for validation) processed with {len(datasets['smoltalk_val'])} examples")
             
             # Save to disk cache
             save_dataset_to_disk(datasets["smoltalk_train"], "sft", f"{dataset_cache_name}_train")
-            save_dataset_to_disk(datasets["smoltalk_val"], "sft", f"{dataset_cache_name}_val")
+            save_dataset_to_disk(datasets["smoltalk_val"], "sft", f"{dataset_cache_name}_test")
     except Exception as e:
         print(f"Error loading SmolTalk dataset: {e}")
     
