@@ -33,6 +33,12 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./models", help="Output directory")
     parser.add_argument("--use_wandb", action="store_true", help="Use Weights & Biases for logging")
     
+    # Data loading arguments
+    parser.add_argument("--max_samples", type=int, default=None, 
+                        help="Maximum number of samples to use per dataset")
+    parser.add_argument("--force_refresh", action="store_true",
+                        help="Force reprocessing of datasets even if cached versions exist")
+    
     # Evaluation arguments
     parser.add_argument("--num_samples", type=int, default=50, help="Number of samples for evaluation")
     parser.add_argument("--reward_model_api_key", type=str, default=None, 
@@ -44,7 +50,12 @@ def main():
     
     # Load datasets
     from data import get_dataloaders
-    dataloaders = get_dataloaders(batch_size=args.batch_size)
+    dataloaders = get_dataloaders(
+        batch_size=args.batch_size,
+        task_mode=args.algorithm if args.algorithm != "all" else None,
+        force_refresh=args.force_refresh,
+        max_samples=args.max_samples
+    )
     
     # Train models if requested
     if args.mode in ["train", "all"]:

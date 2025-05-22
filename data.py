@@ -1,4 +1,4 @@
-from datasets import load_dataset, DatasetDict
+from datasets import load_dataset, DatasetDict, Dataset
 from transformers import AutoTokenizer
 import torch
 from torch.utils.data import DataLoader
@@ -6,6 +6,8 @@ import os
 import sys
 import numpy as np  # Added for percentile calculation
 import argparse
+import pickle
+import time
 
 # Add path to reward function
 sys.path.append(os.path.join(os.path.dirname(__file__), "utils"))
@@ -14,9 +16,75 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "utils"))
 # Can be overridden via command line or by setting directly
 TASK_MODE = "sft"  # Options: "sft", "dpo", "rloo", "all"
 
+# Create cache directory
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset_cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 # Load tokenizer (used for both)
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
 tokenizer.pad_token = tokenizer.eos_token
+
+# Helper functions for disk caching
+def get_cache_path(task, dataset_name):
+    """Get path for cached dataset"""
+    task_dir = os.path.join(CACHE_DIR, task)
+    os.makedirs(task_dir, exist_ok=True)
+    return os.path.join(task_dir, f"{dataset_name}.pt")
+
+def save_dataset_to_disk(dataset, task, dataset_name):
+    """Save processed dataset to disk"""
+    cache_path = get_cache_path(task, dataset_name)
+    try:
+        # Save PyTorch dataset
+        start_time = time.time()
+        with open(cache_path, 'wb') as f:
+            pickle.dump(dataset, f)
+        print(f"Dataset {dataset_name} saved to {cache_path} in {time.time() - start_time:.2f}s")
+        return True
+    except Exception as e:
+        print(f"Error saving dataset {dataset_name} to disk: {e}")
+        # If cache file was created but is incomplete, remove it
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+        return False
+
+def load_dataset_from_disk(task, dataset_name):
+    """Load processed dataset from disk if available"""
+    cache_path = get_cache_path(task, dataset_name)
+    if os.path.exists(cache_path):
+        try:
+            start_time = time.time()
+            with open(cache_path, 'rb') as f:
+                dataset = pickle.load(f)
+            print(f"Loaded cached dataset {dataset_name} from {cache_path} in {time.time() - start_time:.2f}s")
+            return dataset
+        except Exception as e:
+            print(f"Error loading dataset {dataset_name} from disk: {e}")
+            # If cache file is corrupted, remove it
+            os.remove(cache_path)
+    return None
+
+def clear_disk_cache(task=None):
+    """Clear disk cache for specified task or all tasks"""
+    if task:
+        task_dir = os.path.join(CACHE_DIR, task)
+        if os.path.exists(task_dir):
+            for filename in os.listdir(task_dir):
+                file_path = os.path.join(task_dir, filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+            print(f"Disk cache cleared for task: {task}")
+    else:
+        # Clear all cache
+        if os.path.exists(CACHE_DIR):
+            for task_name in os.listdir(CACHE_DIR):
+                task_dir = os.path.join(CACHE_DIR, task_name)
+                if os.path.isdir(task_dir):
+                    for filename in os.listdir(task_dir):
+                        file_path = os.path.join(task_dir, filename)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+            print("All disk cache cleared")
 
 # Helper functions
 def flatten_messages(messages):
@@ -237,93 +305,167 @@ class CountdownPromptsDataset(torch.utils.data.Dataset):
         }
 
 # Dataset loaders
-def load_sft_datasets():
-    """Load datasets needed for SFT"""
+def load_sft_datasets(force_refresh=False, max_samples=None):
+    """
+    Load datasets needed for SFT
+    
+    Args:
+        force_refresh: If True, reprocess datasets even if cached versions exist
+        max_samples: Maximum number of samples to use per dataset (for memory constraints)
+    """
     datasets = {}
     
-    # 1. SmolTalk dataset for SFT - extract only first user-assistant pair from each conversation
+    # 1. SmolTalk dataset for SFT
     try:
-        print("Loading SmolTalk dataset...")
-        smoltalk = load_dataset("HuggingFaceTB/smol-smoltalk", split="train")
-        print(f"SmolTalk dataset loaded with {len(smoltalk)} examples")
+        # Try to load from disk cache first
+        if not force_refresh:
+            cached_dataset = load_dataset_from_disk("sft", "smoltalk")
+            if cached_dataset is not None:
+                datasets["smoltalk"] = cached_dataset
         
-        # Calculate 95th percentile token length
-        max_seq_length = calculate_95th_percentile_length(smoltalk)
-        
-        # Apply tokenization with the calculated max_seq_length
-        print(f"Processing SmolTalk dataset with max sequence length of {max_seq_length}...")
-        
-        # Using a function to include max_seq_length
-        def tokenize_smoltalk_with_length(example):
-            return tokenize_smoltalk(example, max_seq_length)
-        
-        smoltalk_tokenized = smoltalk.map(tokenize_smoltalk_with_length, batched=False)
-        datasets["smoltalk"] = SFTDataset(smoltalk_tokenized)
-        print(f"SmolTalk dataset processed with {len(datasets['smoltalk'])} examples, using only first user-assistant pair")
+        # If not in cache or force_refresh, process from scratch
+        if "smoltalk" not in datasets:
+            print("Loading SmolTalk dataset...")
+            smoltalk = load_dataset("HuggingFaceTB/smol-smoltalk", split="train")
+            print(f"SmolTalk dataset loaded with {len(smoltalk)} examples")
+            
+            # Apply max_samples limit if specified
+            if max_samples and len(smoltalk) > max_samples:
+                print(f"Limiting SmolTalk dataset to {max_samples} examples")
+                smoltalk = smoltalk.select(range(max_samples))
+            
+            # Calculate 95th percentile token length
+            max_seq_length = calculate_95th_percentile_length(smoltalk)
+            
+            # Apply tokenization with the calculated max_seq_length
+            print(f"Processing SmolTalk dataset with max sequence length of {max_seq_length}...")
+            
+            # Using a function to include max_seq_length
+            def tokenize_smoltalk_with_length(example):
+                return tokenize_smoltalk(example, max_seq_length)
+            
+            smoltalk_tokenized = smoltalk.map(tokenize_smoltalk_with_length, batched=False)
+            datasets["smoltalk"] = SFTDataset(smoltalk_tokenized)
+            print(f"SmolTalk dataset processed with {len(datasets['smoltalk'])} examples, using only first user-assistant pair")
+            
+            # Save to disk cache
+            save_dataset_to_disk(datasets["smoltalk"], "sft", "smoltalk")
     except Exception as e:
         print(f"Error loading SmolTalk dataset: {e}")
     
     # 2. WarmStart dataset for SFT (Countdown)
     try:
-        print("Loading WarmStart dataset...")
-        warmstart = load_dataset("Asap7772/cog_behav_all_strategies", split="train")
+        # Try to load from disk cache first
+        if not force_refresh:
+            cached_dataset = load_dataset_from_disk("sft", "warmstart")
+            if cached_dataset is not None:
+                datasets["warmstart"] = cached_dataset
         
-        # Let's print the column names to debug
-        print(f"WarmStart dataset columns: {warmstart.column_names}")
-        
-        # Map dataset with the updated tokenize_countdown function
-        warmstart_tokenized = warmstart.map(tokenize_countdown, batched=False)
-        datasets["warmstart"] = SFTDataset(warmstart_tokenized)
-        print(f"WarmStart dataset loaded with {len(datasets['warmstart'])} examples")
+        # If not in cache or force_refresh, process from scratch
+        if "warmstart" not in datasets:
+            print("Loading WarmStart dataset...")
+            warmstart = load_dataset("Asap7772/cog_behav_all_strategies", split="train")
+            
+            # Apply max_samples limit if specified
+            if max_samples and len(warmstart) > max_samples:
+                print(f"Limiting WarmStart dataset to {max_samples} examples")
+                warmstart = warmstart.select(range(max_samples))
+            
+            # Let's print the column names to debug
+            print(f"WarmStart dataset columns: {warmstart.column_names}")
+            
+            # Map dataset with the updated tokenize_countdown function
+            warmstart_tokenized = warmstart.map(tokenize_countdown, batched=False)
+            datasets["warmstart"] = SFTDataset(warmstart_tokenized)
+            print(f"WarmStart dataset loaded with {len(datasets['warmstart'])} examples")
+            
+            # Save to disk cache
+            save_dataset_to_disk(datasets["warmstart"], "sft", "warmstart")
     except Exception as e:
         print(f"Error loading WarmStart dataset: {e}")
     
     return datasets
 
-def load_dpo_datasets():
-    """Load datasets needed for DPO"""
+def load_dpo_datasets(force_refresh=False, max_samples=None):
+    """Load datasets needed for DPO with disk caching"""
     datasets = {}
     
     # UltraFeedback preference dataset for DPO
     try:
-        print("Loading UltraFeedback dataset...")
-        ultrafeedback = load_dataset("HuggingFaceH4/ultrafeedback_binarized", split="train_prefs")
-        ultrafeedback_tokenized = ultrafeedback.map(tokenize_ultrafeedback, batched=False)
-        datasets["ultrafeedback"] = PreferenceDataset(ultrafeedback_tokenized)
-        print(f"UltraFeedback dataset loaded with {len(datasets['ultrafeedback'])} examples")
+        # Try to load from disk cache first
+        if not force_refresh:
+            cached_dataset = load_dataset_from_disk("dpo", "ultrafeedback")
+            if cached_dataset is not None:
+                datasets["ultrafeedback"] = cached_dataset
+        
+        # If not in cache or force_refresh, process from scratch
+        if "ultrafeedback" not in datasets:
+            print("Loading UltraFeedback dataset...")
+            ultrafeedback = load_dataset("HuggingFaceH4/ultrafeedback_binarized", split="train_prefs")
+            
+            # Apply max_samples limit if specified
+            if max_samples and len(ultrafeedback) > max_samples:
+                print(f"Limiting UltraFeedback dataset to {max_samples} examples")
+                ultrafeedback = ultrafeedback.select(range(max_samples))
+            
+            ultrafeedback_tokenized = ultrafeedback.map(tokenize_ultrafeedback, batched=False)
+            datasets["ultrafeedback"] = PreferenceDataset(ultrafeedback_tokenized)
+            print(f"UltraFeedback dataset loaded with {len(datasets['ultrafeedback'])} examples")
+            
+            # Save to disk cache
+            save_dataset_to_disk(datasets["ultrafeedback"], "dpo", "ultrafeedback")
     except Exception as e:
         print(f"Error loading UltraFeedback dataset: {e}")
     
     return datasets
 
-def load_rloo_datasets():
-    """Load datasets needed for RLOO"""
+def load_rloo_datasets(force_refresh=False, max_samples=None):
+    """Load datasets needed for RLOO with disk caching"""
     datasets = {}
     
     # Prompts dataset for RLOO
     try:
-        print("Loading Countdown prompts dataset...")
-        countdown_prompts = load_dataset("Jiayi-Pan/Countdown-Tasks-3to4", split="train")
-        countdown_prompts_tokenized = countdown_prompts.map(
-            lambda x: {"prompt": x["prompt"], "input_ids": [], "attention_mask": []}, 
-            batched=False
-        )
-        countdown_prompts_tokenized = countdown_prompts_tokenized.map(tokenize_countdown, batched=False)
-        datasets["countdown_prompts"] = CountdownPromptsDataset(countdown_prompts_tokenized)
-        print(f"Countdown prompts dataset loaded with {len(datasets['countdown_prompts'])} examples")
+        # Try to load from disk cache first
+        if not force_refresh:
+            cached_dataset = load_dataset_from_disk("rloo", "countdown_prompts")
+            if cached_dataset is not None:
+                datasets["countdown_prompts"] = cached_dataset
+        
+        # If not in cache or force_refresh, process from scratch
+        if "countdown_prompts" not in datasets:
+            print("Loading Countdown prompts dataset...")
+            countdown_prompts = load_dataset("Jiayi-Pan/Countdown-Tasks-3to4", split="train")
+            
+            # Apply max_samples limit if specified
+            if max_samples and len(countdown_prompts) > max_samples:
+                print(f"Limiting Countdown prompts dataset to {max_samples} examples")
+                countdown_prompts = countdown_prompts.select(range(max_samples))
+            
+            countdown_prompts_tokenized = countdown_prompts.map(
+                lambda x: {"prompt": x["prompt"], "input_ids": [], "attention_mask": []}, 
+                batched=False
+            )
+            countdown_prompts_tokenized = countdown_prompts_tokenized.map(tokenize_countdown, batched=False)
+            datasets["countdown_prompts"] = CountdownPromptsDataset(countdown_prompts_tokenized)
+            print(f"Countdown prompts dataset loaded with {len(datasets['countdown_prompts'])} examples")
+            
+            # Save to disk cache
+            save_dataset_to_disk(datasets["countdown_prompts"], "rloo", "countdown_prompts")
     except Exception as e:
         print(f"Error loading Countdown prompts dataset: {e}")
     
     return datasets
 
 # Main function to load all datasets based on task mode
-def load_datasets(task_mode=None):
+def load_datasets(task_mode=None, force_refresh=False, max_samples=None):
     """
     Load datasets based on the task mode
     
     Args:
         task_mode: Which datasets to load. Options: "sft", "dpo", "rloo", "all"
                   If None, use the global TASK_MODE.
+        force_refresh: If True, reprocess datasets even if cached versions exist
+        max_samples: Maximum number of samples to use per dataset (for memory constraints)
     
     Returns:
         Dictionary of datasets
@@ -335,21 +477,21 @@ def load_datasets(task_mode=None):
     all_datasets = {}
     
     if mode in ["sft", "all"]:
-        sft_datasets = load_sft_datasets()
+        sft_datasets = load_sft_datasets(force_refresh, max_samples)
         all_datasets.update(sft_datasets)
     
     if mode in ["dpo", "all"]:
-        dpo_datasets = load_dpo_datasets()
+        dpo_datasets = load_dpo_datasets(force_refresh, max_samples)
         all_datasets.update(dpo_datasets)
     
     if mode in ["rloo", "all"]:
-        rloo_datasets = load_rloo_datasets()
+        rloo_datasets = load_rloo_datasets(force_refresh, max_samples)
         all_datasets.update(rloo_datasets)
     
     return all_datasets
 
 # Create DataLoaders
-def get_dataloaders(batch_size=8, task_mode=None):
+def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_samples=None):
     """
     Create DataLoader objects for the loaded datasets
     
@@ -357,11 +499,13 @@ def get_dataloaders(batch_size=8, task_mode=None):
         batch_size: Batch size for the DataLoaders
         task_mode: Which datasets to load. Options: "sft", "dpo", "rloo", "all"
                   If None, use the global TASK_MODE.
+        force_refresh: If True, reprocess datasets even if cached versions exist
+        max_samples: Maximum number of samples to use per dataset (for memory constraints)
     
     Returns:
         Dictionary of DataLoader objects
     """
-    datasets = load_datasets(task_mode)
+    datasets = load_datasets(task_mode, force_refresh, max_samples)
     dataloaders = {}
     
     for name, dataset in datasets.items():
@@ -464,6 +608,12 @@ def parse_args():
                         help='Task mode to determine which datasets to load')
     parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size for DataLoaders')
+    parser.add_argument('--force_refresh', action='store_true',
+                        help='Force reprocessing of datasets even if cached versions exist')
+    parser.add_argument('--clear_cache', action='store_true',
+                        help='Clear disk cache for datasets')
+    parser.add_argument('--max_samples', type=int, default=None,
+                        help='Maximum number of samples to use per dataset (for memory constraints)')
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -471,8 +621,19 @@ if __name__ == "__main__":
     args = parse_args()
     TASK_MODE = args.task
     
+    # Clear cache if requested
+    if args.clear_cache:
+        if args.task != "all":
+            clear_disk_cache(args.task)
+        else:
+            clear_disk_cache()
+    
     # Test loading the datasets
-    dataloaders = get_dataloaders(batch_size=args.batch_size)
+    dataloaders = get_dataloaders(
+        batch_size=args.batch_size,
+        force_refresh=args.force_refresh,
+        max_samples=args.max_samples
+    )
     
     # Print sample from each dataset
     for name, loader in dataloaders.items():
