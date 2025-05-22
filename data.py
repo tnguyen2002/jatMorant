@@ -254,10 +254,10 @@ class SFTDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         
-        # Get tensors
-        input_ids = torch.tensor(item["input_ids"])
-        attention_mask = torch.tensor(item["attention_mask"])
-        loss_mask = torch.tensor(item["loss_mask"])
+        # Get tensors - ensure Long type for input_ids and attention_mask
+        input_ids = torch.tensor(item["input_ids"], dtype=torch.long)
+        attention_mask = torch.tensor(item["attention_mask"], dtype=torch.long)
+        loss_mask = torch.tensor(item["loss_mask"], dtype=torch.long)  
         
         # Truncate if necessary
         if len(input_ids) > self.max_length:
@@ -272,15 +272,15 @@ class SFTDataset(torch.utils.data.Dataset):
             
             # Pad input_ids with padding token
             input_ids = torch.cat([input_ids, 
-                                  torch.full((pad_length,), tokenizer.pad_token_id, dtype=input_ids.dtype)])
+                                   torch.full((pad_length,), tokenizer.pad_token_id, dtype=torch.long)])
             
             # Pad attention_mask with zeros
             attention_mask = torch.cat([attention_mask, 
-                                      torch.zeros(pad_length, dtype=attention_mask.dtype)])
+                                      torch.zeros(pad_length, dtype=torch.long)])
             
             # Pad loss_mask with zeros
             loss_mask = torch.cat([loss_mask, 
-                                 torch.zeros(pad_length, dtype=loss_mask.dtype)])
+                                 torch.zeros(pad_length, dtype=torch.long)])
         
         return {
             "input_ids": input_ids,
