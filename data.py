@@ -458,11 +458,14 @@ def load_rloo_datasets(force_refresh=False, max_samples=None, max_length=1024):
             if max_samples and len(countdown_prompts) > max_samples:
                 print(f"Limiting Countdown prompts dataset to {max_samples} examples")
                 countdown_prompts = countdown_prompts.select(range(max_samples))
+                
+            def extract_prompt(example):
+                prompt = example.get("prompt") or example.get("query")
+                if prompt is None:
+                    raise ValueError(f"No 'prompt' or 'query' field found in example: {example}")
+                return {"prompt": prompt, "input_ids": [], "attention_mask": []}
             
-            countdown_prompts_tokenized = countdown_prompts.map(
-                lambda x: {"prompt": x["prompt"], "input_ids": [], "attention_mask": []}, 
-                batched=False
-            )
+            countdown_prompts_tokenized = countdown_prompts.map(extract_prompt, batched=False)
             countdown_prompts_tokenized = countdown_prompts_tokenized.map(tokenize_countdown, batched=False)
             datasets["countdown_prompts"] = CountdownPromptsDataset(countdown_prompts_tokenized)
             print(f"Countdown prompts dataset loaded with {len(datasets['countdown_prompts'])} examples")
