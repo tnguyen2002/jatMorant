@@ -334,13 +334,6 @@ def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024):
         max_samples: Maximum number of samples to use per dataset (for memory constraints)
         max_length: Maximum sequence length for all examples
     """
-    global _DATASET_CACHE
-    
-    # Check if SFT datasets are already cached
-    if not force_refresh and "sft" in _DATASET_CACHE:
-        print("Using cached SFT datasets")
-        return _DATASET_CACHE["sft"]
-    
     datasets = {}
     
     # 1. SmolTalk dataset for SFT
