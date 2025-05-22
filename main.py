@@ -49,6 +49,8 @@ def main():
                         help="Ratio of the full dataset to use for training (0.1 = 10%)")
     parser.add_argument("--val_split", type=float, default=0.1,
                         help="Ratio of the training data to use for validation")
+    parser.add_argument("--val_max_samples", type=int, default=2000,
+                        help="Maximum number of validation samples to use (limits test set size)")
     
     # Evaluation arguments
     parser.add_argument("--num_samples", type=int, default=50, help="Number of samples for evaluation")
@@ -69,7 +71,8 @@ def main():
         max_length=args.max_length,
         specific_dataset=args.dataset,
         train_ratio=args.train_ratio,
-        val_split=args.val_split
+        val_split=args.val_split,
+        val_max_samples=args.val_max_samples
     )
     
     # Train models if requested

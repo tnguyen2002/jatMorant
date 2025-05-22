@@ -323,7 +323,7 @@ class CountdownPromptsDataset(torch.utils.data.Dataset):
         }
 
 # Dataset loaders
-def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024, train_ratio=1.0, val_split=0.1):
+def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024, train_ratio=1.0, val_split=0.1, val_max_samples=2000):
     """
     Load datasets needed for SFT
     
@@ -333,6 +333,7 @@ def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024, tr
         max_length: Maximum sequence length for all examples
         train_ratio: Ratio of the full dataset to use for training (0.1 = 10%)
         val_split: Ratio of the training data to use for validation (not used when using test split)
+        val_max_samples: Maximum number of samples to use for validation (limits test set size)
     """
     datasets = {}
     
@@ -380,10 +381,12 @@ def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024, tr
                 smoltalk_train = smoltalk_train.select(range(max_samples))
             
             # Limit test set size if needed (usually much smaller than train)
-            test_max_samples = max(1000, int(max_samples * 0.1)) if max_samples else None
-            if test_max_samples and len(smoltalk_test) > test_max_samples:
-                print(f"Limiting SmolTalk test dataset to {test_max_samples} examples")
-                smoltalk_test = smoltalk_test.select(range(test_max_samples))
+            if val_max_samples and len(smoltalk_test) > val_max_samples:
+                print(f"Limiting SmolTalk test dataset to {val_max_samples} examples for validation")
+                # Sample randomly rather than taking first few examples
+                random.seed(43)  # Different seed than training
+                test_indices = random.sample(range(len(smoltalk_test)), val_max_samples)
+                smoltalk_test = smoltalk_test.select(test_indices)
             
             print("Processing SmolTalk dataset with input=256 tokens, output=1024 tokens")
             
@@ -507,7 +510,7 @@ def load_rloo_datasets(force_refresh=False, max_samples=None, max_length=1024):
     return datasets
 
 # Main function to load all datasets based on task mode
-def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_length=1024, train_ratio=1.0, val_split=0.1):
+def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_length=1024, train_ratio=1.0, val_split=0.1, val_max_samples=2000):
     """
     Load datasets based on the task mode
     
@@ -519,6 +522,7 @@ def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_len
         max_length: Maximum sequence length for all examples
         train_ratio: Ratio of the full dataset to use for training (0.1 = 10%)
         val_split: Ratio of the training data to use for validation
+        val_max_samples: Maximum number of samples to use for validation
     
     Returns:
         Dictionary of datasets
@@ -530,7 +534,7 @@ def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_len
     all_datasets = {}
     
     if mode in ["sft", "all"]:
-        sft_datasets = load_sft_datasets(force_refresh, max_samples, max_length, train_ratio, val_split)
+        sft_datasets = load_sft_datasets(force_refresh, max_samples, max_length, train_ratio, val_split, val_max_samples)
         all_datasets.update(sft_datasets)
     
     if mode in ["dpo", "all"]:
@@ -544,7 +548,7 @@ def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_len
     return all_datasets
 
 # Create DataLoaders
-def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_samples=None, max_length=1024, specific_dataset=None, train_ratio=1.0, val_split=0.1):
+def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_samples=None, max_length=1024, specific_dataset=None, train_ratio=1.0, val_split=0.1, val_max_samples=2000):
     """
     Create DataLoader objects for the loaded datasets
     
@@ -558,11 +562,12 @@ def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_sampl
         specific_dataset: If provided, only load this specific dataset
         train_ratio: Ratio of the full dataset to use for training (0.1 = 10%)
         val_split: Ratio of the training data to use for validation
+        val_max_samples: Maximum number of samples to use for validation
     
     Returns:
         Dictionary of DataLoader objects
     """
-    datasets = load_datasets(task_mode, force_refresh, max_samples, max_length, train_ratio, val_split)
+    datasets = load_datasets(task_mode, force_refresh, max_samples, max_length, train_ratio, val_split, val_max_samples)
     dataloaders = {}
     
     for name, dataset in datasets.items():
@@ -687,6 +692,8 @@ def parse_args():
                         help='Ratio of the full dataset to use for training (0.1 = 10%)')
     parser.add_argument('--val_split', type=float, default=0.1,
                         help='Ratio of the training data to use for validation')
+    parser.add_argument('--val_max_samples', type=int, default=2000,
+                        help='Maximum number of validation samples to use (limits test set size)')
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -709,7 +716,8 @@ if __name__ == "__main__":
         max_length=args.max_length,
         specific_dataset=args.specific_dataset,
         train_ratio=args.train_ratio,
-        val_split=args.val_split
+        val_split=args.val_split,
+        val_max_samples=args.val_max_samples
     )
     
     # Print sample from each dataset
