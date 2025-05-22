@@ -20,3 +20,4 @@ pip install --no-cache-dir --upgrade \
 
 
 # For SFT Smoltalk
+python main.py --mode train --algorithm sft --batch_size 4 --learning_rate 1e-5 --num_epochs 1 --output_dir ./models --max_length 1280 --dataset smoltalk --train_ratio 0.1 --use_wandb       
