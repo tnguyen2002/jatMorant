@@ -89,7 +89,7 @@ def main():
                     model_name="Qwen/Qwen2.5-0.5B",
                     learning_rate=args.learning_rate,
                     num_train_epochs=args.num_epochs,
-                    output_dir=sft_output_dir,
+                    output_dir=os.path.join(sft_output_dir, "best_model"),
                     use_wandb=args.use_wandb,
                     eval_every=100,  # Evaluate every 100 steps
                 )

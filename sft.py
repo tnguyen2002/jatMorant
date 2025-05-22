@@ -62,6 +62,10 @@ class SFTTrainer:
         self.save_every = save_every
         self.eval_every = eval_every
         
+        # Track best model
+        self.best_eval_loss = float('inf')
+        self.best_model_path = None
+        
         # Set device
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -170,11 +174,6 @@ class SFTTrainer:
                         "step": global_step,
                     })
                 
-                # Save checkpoint
-                if global_step % self.save_every == 0:
-                    logger.info(f"Saving checkpoint at step {global_step}")
-                    self.save_model(f"{self.output_dir}/checkpoint-{global_step}")
-                
                 # Evaluate
                 if eval_dataloader is not None and global_step % self.eval_every == 0:
                     logger.info(f"Evaluating at step {global_step}")
@@ -184,16 +183,29 @@ class SFTTrainer:
                     if self.use_wandb:
                         wandb.log({"eval_loss": eval_loss})
                     
+                    # Save only if this is the best model so far
+                    if eval_loss < self.best_eval_loss:
+                        logger.info(f"New best model with eval loss: {eval_loss:.4f} (previous best: {self.best_eval_loss:.4f})")
+                        self.best_eval_loss = eval_loss
+                        
+                        # Delete previous best model to save space
+                        if self.best_model_path and os.path.exists(self.best_model_path):
+                            import shutil
+                            try:
+                                shutil.rmtree(self.best_model_path)
+                                logger.info(f"Removed previous best model: {self.best_model_path}")
+                            except Exception as e:
+                                logger.warning(f"Failed to remove previous checkpoint: {e}")
+                        
+                        # Save new best model
+                        self.best_model_path = f"{self.output_dir}/best-model-{global_step}"
+                        self.save_model(self.best_model_path)
+                    
                     # Switch back to training mode
                     self.model.train()
             
-            # Save model at the end of each epoch
-            logger.info(f"Saving model at the end of epoch {epoch+1}")
-            self.save_model(f"{self.output_dir}/checkpoint-epoch-{epoch+1}")
-        
-        # Save final model
-        logger.info("Saving final model")
-        self.save_model(self.output_dir)
+        # Save final model (only if it's the best we've seen)
+        logger.info(f"Training complete. Best model saved at: {self.best_model_path}")
         
         if self.use_wandb:
             wandb.finish()
