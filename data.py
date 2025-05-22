@@ -206,39 +206,37 @@ def tokenize_smoltalk(example, max_seq_length=None):
 
 # Tokenization for verifier-based datasets (e.g., Countdown)
 def tokenize_countdown(example):
-    # Check if we have "prompt" or "query" field
-    if "prompt" in example:
-        prompt = example["prompt"]
-    elif "query" in example:
-        prompt = example["query"]
-    else:
-        prompt = ""  # Fallback
-    
-    # Check if we have "completion" field
+    # Generate prompt from 'nums' and 'target'
+    nums = example["nums"]
+    target = example["target"]
+    prompt = f"Using the numbers {nums}, where you use each number only once, make the target number {target} using +, -, *, and /. Output a single expression."
+
+    # No known ground truth 'completion', so just use empty or dummy string
     completion = example.get("completion", "")
-    
+
     # Tokenize prompt separately to get its length
     prompt_tokens = tokenizer(prompt, add_special_tokens=True)["input_ids"]
     prompt_len = len(prompt_tokens)
-    
-    # Tokenize full input
+
+    # Tokenize full input (prompt + completion)
     full_input = prompt + completion
     tokens = tokenizer(full_input, truncation=True, padding="max_length", max_length=512)
-    
-    # Create a loss mask that masks out the prompt tokens
+
+    # Create loss mask that ignores prompt
     loss_mask = tokens["attention_mask"].copy()
     for i in range(prompt_len):
         if i < len(loss_mask):
             loss_mask[i] = 0
-    
+
     return {
         "prompt": prompt,
         "completion": completion,
         "input_ids": tokens["input_ids"],
         "attention_mask": tokens["attention_mask"],
         "loss_mask": loss_mask,
-        "verifier_score": example.get("verifier_score", 0.0)  # if exists
+        "verifier_score": example.get("verifier_score", 0.0)
     }
+
 
 # Dataset Classes
 
@@ -477,41 +475,37 @@ def load_dpo_datasets(force_refresh=False, max_samples=None, max_length=1024):
 def load_rloo_datasets(force_refresh=False, max_samples=None, max_length=1024):
     """Load datasets needed for RLOO with disk caching"""
     datasets = {}
-    
-    # Prompts dataset for RLOO
+
     try:
         # Try to load from disk cache first
         if not force_refresh:
             cached_dataset = load_dataset_from_disk("rloo", "countdown_prompts")
             if cached_dataset is not None:
                 datasets["countdown_prompts"] = cached_dataset
-        
+
         # If not in cache or force_refresh, process from scratch
         if "countdown_prompts" not in datasets:
             print("Loading Countdown prompts dataset...")
             countdown_prompts = load_dataset("Jiayi-Pan/Countdown-Tasks-3to4", split="train")
-            
+
             # Apply max_samples limit if specified
             if max_samples and len(countdown_prompts) > max_samples:
                 print(f"Limiting Countdown prompts dataset to {max_samples} examples")
                 countdown_prompts = countdown_prompts.select(range(max_samples))
-                
-            def extract_prompt(example):
-                prompt = example.get("prompt") or example.get("query")
-                if prompt is None:
-                    raise ValueError(f"No 'prompt' or 'query' field found in example: {example}")
-                return {"prompt": prompt, "input_ids": [], "attention_mask": []}
-            
-            countdown_prompts_tokenized = countdown_prompts.map(extract_prompt, batched=False)
-            countdown_prompts_tokenized = countdown_prompts_tokenized.map(tokenize_countdown, batched=False)
+
+            # Tokenize using updated tokenizer (which constructs prompt from nums + target)
+            countdown_prompts_tokenized = countdown_prompts.map(tokenize_countdown, batched=False)
+
+            # Wrap in PyTorch Dataset
             datasets["countdown_prompts"] = CountdownPromptsDataset(countdown_prompts_tokenized)
             print(f"Countdown prompts dataset loaded with {len(datasets['countdown_prompts'])} examples")
-            
+
             # Save to disk cache
             save_dataset_to_disk(datasets["countdown_prompts"], "rloo", "countdown_prompts")
+
     except Exception as e:
         print(f"Error loading Countdown prompts dataset: {e}")
-    
+
     return datasets
 
 # Main function to load all datasets based on task mode
