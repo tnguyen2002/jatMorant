@@ -325,7 +325,7 @@ class CountdownPromptsDataset(torch.utils.data.Dataset):
         }
 
 # Dataset loaders
-def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024):
+def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024, train_ratio=1.0, val_split=0.1):
     """
     Load datasets needed for SFT
     
@@ -333,40 +333,77 @@ def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024):
         force_refresh: If True, reprocess datasets even if cached versions exist
         max_samples: Maximum number of samples to use per dataset (for memory constraints)
         max_length: Maximum sequence length for all examples
+        train_ratio: Ratio of the full dataset to use for training (0.1 = 10%)
+        val_split: Ratio of the training data to use for validation
     """
     datasets = {}
     
     # 1. SmolTalk dataset for SFT
     try:
+        # Set cache name based on parameters to ensure we don't mix different configurations
+        dataset_cache_name = f"smoltalk_ratio{train_ratio}_val{val_split}"
+        
         # Try to load from disk cache first
         if not force_refresh:
-            cached_dataset = load_dataset_from_disk("sft", "smoltalk")
-            if cached_dataset is not None:
-                datasets["smoltalk"] = cached_dataset
+            cached_dataset_train = load_dataset_from_disk("sft", f"{dataset_cache_name}_train")
+            cached_dataset_val = load_dataset_from_disk("sft", f"{dataset_cache_name}_val")
+            if cached_dataset_train is not None and cached_dataset_val is not None:
+                datasets["smoltalk_train"] = cached_dataset_train
+                datasets["smoltalk_val"] = cached_dataset_val
         
         # If not in cache or force_refresh, process from scratch
-        if "smoltalk" not in datasets:
+        if "smoltalk_train" not in datasets or "smoltalk_val" not in datasets:
             print("Loading SmolTalk dataset...")
             smoltalk = load_dataset("HuggingFaceTB/smol-smoltalk", split="train")
             print(f"SmolTalk dataset loaded with {len(smoltalk)} examples")
             
-            # Apply max_samples limit if specified
-            if max_samples and len(smoltalk) > max_samples:
+            # Apply train ratio to limit dataset size
+            if train_ratio < 1.0:
+                total_samples = len(smoltalk)
+                num_samples = int(total_samples * train_ratio)
+                print(f"Using {train_ratio*100:.1f}% of SmolTalk data: {num_samples} examples")
+                
+                # Override max_samples if smaller than the ratio-limited sample count
+                if max_samples is not None:
+                    num_samples = min(num_samples, max_samples)
+                    print(f"Further limited to {num_samples} examples due to max_samples")
+                
+                # Sample randomly
+                import random
+                random.seed(42)  # For reproducibility
+                indices = random.sample(range(total_samples), num_samples)
+                smoltalk = smoltalk.select(indices)
+            # If not using train_ratio but using max_samples
+            elif max_samples and len(smoltalk) > max_samples:
                 print(f"Limiting SmolTalk dataset to {max_samples} examples")
                 smoltalk = smoltalk.select(range(max_samples))
             
+            # Split into train and validation
+            val_size = int(len(smoltalk) * val_split)
+            train_size = len(smoltalk) - val_size
+            
+            # Create splits
+            train_val_split = smoltalk.train_test_split(test_size=val_size, train_size=train_size, seed=42)
+            smoltalk_train = train_val_split['train']
+            smoltalk_val = train_val_split['test']
+            
+            print(f"Split into {len(smoltalk_train)} training and {len(smoltalk_val)} validation examples")
+            
             print("Processing SmolTalk dataset with input=256 tokens, output=1024 tokens")
             
-            # Process the dataset with updated tokenization function
-            smoltalk_tokenized = smoltalk.map(tokenize_smoltalk, batched=False)
+            # Process the train dataset
+            smoltalk_train_tokenized = smoltalk_train.map(tokenize_smoltalk, batched=False)
+            datasets["smoltalk_train"] = SFTDataset(smoltalk_train_tokenized, max_length=max_length)
+            print(f"SmolTalk train dataset processed with {len(datasets['smoltalk_train'])} examples")
             
-            # Use the SFTDataset class to ensure consistent length for batching
-            datasets["smoltalk"] = SFTDataset(smoltalk_tokenized, max_length=max_length)
-            print(f"SmolTalk dataset processed with {len(datasets['smoltalk'])} examples, using only first user-assistant pair")
-            print(f"All examples padded/truncated to max_length={max_length}")
+            # Process the validation dataset
+            smoltalk_val_tokenized = smoltalk_val.map(tokenize_smoltalk, batched=False)
+            datasets["smoltalk_val"] = SFTDataset(smoltalk_val_tokenized, max_length=max_length)
+            print(f"SmolTalk validation dataset processed with {len(datasets['smoltalk_val'])} examples")
             
             # Save to disk cache
-            save_dataset_to_disk(datasets["smoltalk"], "sft", "smoltalk")
+            save_dataset_to_disk(datasets["smoltalk_train"], "sft", f"{dataset_cache_name}_train")
+            save_dataset_to_disk(datasets["smoltalk_val"], "sft", f"{dataset_cache_name}_val")
     except Exception as e:
         print(f"Error loading SmolTalk dataset: {e}")
     
@@ -475,7 +512,7 @@ def load_rloo_datasets(force_refresh=False, max_samples=None, max_length=1024):
     return datasets
 
 # Main function to load all datasets based on task mode
-def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_length=1024):
+def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_length=1024, train_ratio=1.0, val_split=0.1):
     """
     Load datasets based on the task mode
     
@@ -485,6 +522,8 @@ def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_len
         force_refresh: If True, reprocess datasets even if cached versions exist
         max_samples: Maximum number of samples to use per dataset (for memory constraints)
         max_length: Maximum sequence length for all examples
+        train_ratio: Ratio of the full dataset to use for training (0.1 = 10%)
+        val_split: Ratio of the training data to use for validation
     
     Returns:
         Dictionary of datasets
@@ -496,7 +535,7 @@ def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_len
     all_datasets = {}
     
     if mode in ["sft", "all"]:
-        sft_datasets = load_sft_datasets(force_refresh, max_samples, max_length)
+        sft_datasets = load_sft_datasets(force_refresh, max_samples, max_length, train_ratio, val_split)
         all_datasets.update(sft_datasets)
     
     if mode in ["dpo", "all"]:
@@ -510,7 +549,7 @@ def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_len
     return all_datasets
 
 # Create DataLoaders
-def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_samples=None, max_length=1024, specific_dataset=None):
+def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_samples=None, max_length=1024, specific_dataset=None, train_ratio=1.0, val_split=0.1):
     """
     Create DataLoader objects for the loaded datasets
     
@@ -522,23 +561,28 @@ def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_sampl
         max_samples: Maximum number of samples to use per dataset (for memory constraints)
         max_length: Maximum sequence length for all examples
         specific_dataset: If provided, only load this specific dataset
+        train_ratio: Ratio of the full dataset to use for training (0.1 = 10%)
+        val_split: Ratio of the training data to use for validation
     
     Returns:
         Dictionary of DataLoader objects
     """
-    datasets = load_datasets(task_mode, force_refresh, max_samples, max_length)
+    datasets = load_datasets(task_mode, force_refresh, max_samples, max_length, train_ratio, val_split)
     dataloaders = {}
     
     for name, dataset in datasets.items():
         # Skip if a specific dataset is requested and this isn't it
-        if specific_dataset is not None and name != specific_dataset:
-            print(f"Skipping dataset {name} as only {specific_dataset} was requested")
-            continue
+        # We need to handle _train and _val suffixes
+        if specific_dataset is not None:
+            base_name = name.split('_')[0]
+            if base_name != specific_dataset:
+                print(f"Skipping dataset {name} as only {specific_dataset} was requested")
+                continue
             
         dataloaders[name] = DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=name.endswith('_train'),  # Only shuffle training data
             pin_memory=True
         )
     
@@ -644,6 +688,10 @@ def parse_args():
                         help='Maximum sequence length for all examples')
     parser.add_argument('--specific_dataset', type=str, default=None,
                         help='Only load this specific dataset')
+    parser.add_argument('--train_ratio', type=float, default=1.0,
+                        help='Ratio of the full dataset to use for training (0.1 = 10%)')
+    parser.add_argument('--val_split', type=float, default=0.1,
+                        help='Ratio of the training data to use for validation')
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -664,7 +712,9 @@ if __name__ == "__main__":
         force_refresh=args.force_refresh,
         max_samples=args.max_samples,
         max_length=args.max_length,
-        specific_dataset=args.specific_dataset
+        specific_dataset=args.specific_dataset,
+        train_ratio=args.train_ratio,
+        val_split=args.val_split
     )
     
     # Print sample from each dataset

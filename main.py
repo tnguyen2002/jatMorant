@@ -45,6 +45,10 @@ def main():
                         help="Specific dataset to train on (will ignore others)")
     parser.add_argument("--init_from_checkpoint", type=str, default=None,
                         help="Initialize model from a checkpoint (provide path)")
+    parser.add_argument("--train_ratio", type=float, default=1.0,
+                        help="Ratio of the full dataset to use for training (0.1 = 10%)")
+    parser.add_argument("--val_split", type=float, default=0.1,
+                        help="Ratio of the training data to use for validation")
     
     # Evaluation arguments
     parser.add_argument("--num_samples", type=int, default=50, help="Number of samples for evaluation")
@@ -63,7 +67,9 @@ def main():
         force_refresh=args.force_refresh,
         max_samples=args.max_samples,
         max_length=args.max_length,
-        specific_dataset=args.dataset
+        specific_dataset=args.dataset,
+        train_ratio=args.train_ratio,
+        val_split=args.val_split
     )
     
     # Train models if requested
@@ -77,7 +83,7 @@ def main():
             sft_output_dir = os.path.join(args.output_dir, "sft")
             
             # Train SFT with the SmolTalk dataset
-            if "smoltalk" in dataloaders and (args.dataset is None or args.dataset == "smoltalk"):
+            if ("smoltalk_train" in dataloaders and "smoltalk_val" in dataloaders) and (args.dataset is None or args.dataset == "smoltalk"):
                 logger.info("Training SFT model with SmolTalk dataset...")
                 sft_trainer = SFTTrainer(
                     model_name="Qwen/Qwen2.5-0.5B",
@@ -85,8 +91,10 @@ def main():
                     num_train_epochs=args.num_epochs,
                     output_dir=sft_output_dir,
                     use_wandb=args.use_wandb,
+                    validation_dataloader=dataloaders["smoltalk_val"],
+                    validation_steps=100,
                 )
-                sft_trainer.train(dataloaders["smoltalk"])
+                sft_trainer.train(dataloaders["smoltalk_train"])
             
             # Train SFT with the Warmstart dataset for Countdown
             if "warmstart" in dataloaders and (args.dataset is None or args.dataset == "warmstart"):
