@@ -38,6 +38,13 @@ def main():
                         help="Maximum number of samples to use per dataset")
     parser.add_argument("--force_refresh", action="store_true",
                         help="Force reprocessing of datasets even if cached versions exist")
+    parser.add_argument("--max_length", type=int, default=1024,
+                        help="Maximum sequence length for all examples")
+    parser.add_argument("--dataset", type=str, default=None,
+                        choices=["smoltalk", "warmstart", "ultrafeedback", "countdown_prompts"],
+                        help="Specific dataset to train on (will ignore others)")
+    parser.add_argument("--init_from_checkpoint", type=str, default=None,
+                        help="Initialize model from a checkpoint (provide path)")
     
     # Evaluation arguments
     parser.add_argument("--num_samples", type=int, default=50, help="Number of samples for evaluation")
@@ -54,7 +61,9 @@ def main():
         batch_size=args.batch_size,
         task_mode=args.algorithm if args.algorithm != "all" else None,
         force_refresh=args.force_refresh,
-        max_samples=args.max_samples
+        max_samples=args.max_samples,
+        max_length=args.max_length,
+        specific_dataset=args.dataset
     )
     
     # Train models if requested
@@ -68,7 +77,7 @@ def main():
             sft_output_dir = os.path.join(args.output_dir, "sft")
             
             # Train SFT with the SmolTalk dataset
-            if "smoltalk" in dataloaders:
+            if "smoltalk" in dataloaders and (args.dataset is None or args.dataset == "smoltalk"):
                 logger.info("Training SFT model with SmolTalk dataset...")
                 sft_trainer = SFTTrainer(
                     model_name="Qwen/Qwen2.5-0.5B",
@@ -80,11 +89,17 @@ def main():
                 sft_trainer.train(dataloaders["smoltalk"])
             
             # Train SFT with the Warmstart dataset for Countdown
-            if "warmstart" in dataloaders:
+            if "warmstart" in dataloaders and (args.dataset is None or args.dataset == "warmstart"):
                 logger.info("Training SFT model with Warmstart dataset...")
                 countdown_sft_output_dir = os.path.join(args.output_dir, "countdown_sft")
+                
+                # Initialize from checkpoint if provided
+                model_name = args.init_from_checkpoint if args.init_from_checkpoint else "Qwen/Qwen2.5-0.5B"
+                if args.init_from_checkpoint:
+                    logger.info(f"Initializing from checkpoint: {args.init_from_checkpoint}")
+                
                 countdown_sft_trainer = SFTTrainer(
-                    model_name="Qwen/Qwen2.5-0.5B",
+                    model_name=model_name,
                     learning_rate=args.learning_rate,
                     num_train_epochs=args.num_epochs,
                     output_dir=countdown_sft_output_dir,
@@ -101,7 +116,7 @@ def main():
             dpo_output_dir = os.path.join(args.output_dir, "dpo")
             
             # Train DPO with the UltraFeedback dataset
-            if "ultrafeedback" in dataloaders:
+            if "ultrafeedback" in dataloaders and (args.dataset is None or args.dataset == "ultrafeedback"):
                 logger.info("Training DPO model with UltraFeedback dataset...")
                 dpo_trainer = DPOTrainer(
                     model_name="Qwen/Qwen2.5-0.5B",
@@ -122,7 +137,7 @@ def main():
             rloo_output_dir = os.path.join(args.output_dir, "rloo")
             
             # Train RLOO with the Countdown prompts dataset
-            if "countdown_prompts" in dataloaders:
+            if "countdown_prompts" in dataloaders and (args.dataset is None or args.dataset == "countdown_prompts"):
                 logger.info("Training RLOO model with Countdown prompts dataset...")
                 rloo_trainer = RLOOTrainer(
                     model_name="Qwen/Qwen2.5-0.5B",

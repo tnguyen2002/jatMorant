@@ -254,18 +254,48 @@ def tokenize_countdown(example):
 
 # For SFT
 class SFTDataset(torch.utils.data.Dataset):
-    def __init__(self, tokenized_dataset):
+    def __init__(self, tokenized_dataset, max_length=1024):
         self.data = tokenized_dataset
+        self.max_length = max_length
     
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
         item = self.data[idx]
+        
+        # Get tensors
+        input_ids = torch.tensor(item["input_ids"])
+        attention_mask = torch.tensor(item["attention_mask"])
+        loss_mask = torch.tensor(item["loss_mask"])
+        
+        # Truncate if necessary
+        if len(input_ids) > self.max_length:
+            input_ids = input_ids[:self.max_length]
+            attention_mask = attention_mask[:self.max_length]
+            loss_mask = loss_mask[:self.max_length]
+        
+        # Pad if necessary
+        if len(input_ids) < self.max_length:
+            # Calculate padding needed
+            pad_length = self.max_length - len(input_ids)
+            
+            # Pad input_ids with padding token
+            input_ids = torch.cat([input_ids, 
+                                  torch.full((pad_length,), tokenizer.pad_token_id, dtype=input_ids.dtype)])
+            
+            # Pad attention_mask with zeros
+            attention_mask = torch.cat([attention_mask, 
+                                      torch.zeros(pad_length, dtype=attention_mask.dtype)])
+            
+            # Pad loss_mask with zeros
+            loss_mask = torch.cat([loss_mask, 
+                                 torch.zeros(pad_length, dtype=loss_mask.dtype)])
+        
         return {
-            "input_ids": torch.tensor(item["input_ids"]),
-            "attention_mask": torch.tensor(item["attention_mask"]),
-            "loss_mask": torch.tensor(item["loss_mask"])
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "loss_mask": loss_mask
         }
 
 # For DPO
@@ -305,14 +335,22 @@ class CountdownPromptsDataset(torch.utils.data.Dataset):
         }
 
 # Dataset loaders
-def load_sft_datasets(force_refresh=False, max_samples=None):
+def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024):
     """
     Load datasets needed for SFT
     
     Args:
         force_refresh: If True, reprocess datasets even if cached versions exist
         max_samples: Maximum number of samples to use per dataset (for memory constraints)
+        max_length: Maximum sequence length for all examples
     """
+    global _DATASET_CACHE
+    
+    # Check if SFT datasets are already cached
+    if not force_refresh and "sft" in _DATASET_CACHE:
+        print("Using cached SFT datasets")
+        return _DATASET_CACHE["sft"]
+    
     datasets = {}
     
     # 1. SmolTalk dataset for SFT
@@ -335,18 +373,17 @@ def load_sft_datasets(force_refresh=False, max_samples=None):
                 smoltalk = smoltalk.select(range(max_samples))
             
             # Calculate 95th percentile token length
-            max_seq_length = calculate_95th_percentile_length(smoltalk)
-            
-            # Apply tokenization with the calculated max_seq_length
-            print(f"Processing SmolTalk dataset with max sequence length of {max_seq_length}...")
+            dataset_max_seq_length = calculate_95th_percentile_length(smoltalk)
+            print(f"Using max sequence length of {dataset_max_seq_length} for processing")
             
             # Using a function to include max_seq_length
             def tokenize_smoltalk_with_length(example):
-                return tokenize_smoltalk(example, max_seq_length)
+                return tokenize_smoltalk(example, dataset_max_seq_length)
             
             smoltalk_tokenized = smoltalk.map(tokenize_smoltalk_with_length, batched=False)
-            datasets["smoltalk"] = SFTDataset(smoltalk_tokenized)
+            datasets["smoltalk"] = SFTDataset(smoltalk_tokenized, max_length=max_length)
             print(f"SmolTalk dataset processed with {len(datasets['smoltalk'])} examples, using only first user-assistant pair")
+            print(f"All examples padded/truncated to max_length={max_length}")
             
             # Save to disk cache
             save_dataset_to_disk(datasets["smoltalk"], "sft", "smoltalk")
@@ -376,8 +413,9 @@ def load_sft_datasets(force_refresh=False, max_samples=None):
             
             # Map dataset with the updated tokenize_countdown function
             warmstart_tokenized = warmstart.map(tokenize_countdown, batched=False)
-            datasets["warmstart"] = SFTDataset(warmstart_tokenized)
+            datasets["warmstart"] = SFTDataset(warmstart_tokenized, max_length=max_length)
             print(f"WarmStart dataset loaded with {len(datasets['warmstart'])} examples")
+            print(f"All examples padded/truncated to max_length={max_length}")
             
             # Save to disk cache
             save_dataset_to_disk(datasets["warmstart"], "sft", "warmstart")
@@ -386,7 +424,7 @@ def load_sft_datasets(force_refresh=False, max_samples=None):
     
     return datasets
 
-def load_dpo_datasets(force_refresh=False, max_samples=None):
+def load_dpo_datasets(force_refresh=False, max_samples=None, max_length=1024):
     """Load datasets needed for DPO with disk caching"""
     datasets = {}
     
@@ -419,7 +457,7 @@ def load_dpo_datasets(force_refresh=False, max_samples=None):
     
     return datasets
 
-def load_rloo_datasets(force_refresh=False, max_samples=None):
+def load_rloo_datasets(force_refresh=False, max_samples=None, max_length=1024):
     """Load datasets needed for RLOO with disk caching"""
     datasets = {}
     
@@ -457,7 +495,7 @@ def load_rloo_datasets(force_refresh=False, max_samples=None):
     return datasets
 
 # Main function to load all datasets based on task mode
-def load_datasets(task_mode=None, force_refresh=False, max_samples=None):
+def load_datasets(task_mode=None, force_refresh=False, max_samples=None, max_length=1024):
     """
     Load datasets based on the task mode
     
@@ -466,6 +504,7 @@ def load_datasets(task_mode=None, force_refresh=False, max_samples=None):
                   If None, use the global TASK_MODE.
         force_refresh: If True, reprocess datasets even if cached versions exist
         max_samples: Maximum number of samples to use per dataset (for memory constraints)
+        max_length: Maximum sequence length for all examples
     
     Returns:
         Dictionary of datasets
@@ -477,21 +516,21 @@ def load_datasets(task_mode=None, force_refresh=False, max_samples=None):
     all_datasets = {}
     
     if mode in ["sft", "all"]:
-        sft_datasets = load_sft_datasets(force_refresh, max_samples)
+        sft_datasets = load_sft_datasets(force_refresh, max_samples, max_length)
         all_datasets.update(sft_datasets)
     
     if mode in ["dpo", "all"]:
-        dpo_datasets = load_dpo_datasets(force_refresh, max_samples)
+        dpo_datasets = load_dpo_datasets(force_refresh, max_samples, max_length)
         all_datasets.update(dpo_datasets)
     
     if mode in ["rloo", "all"]:
-        rloo_datasets = load_rloo_datasets(force_refresh, max_samples)
+        rloo_datasets = load_rloo_datasets(force_refresh, max_samples, max_length)
         all_datasets.update(rloo_datasets)
     
     return all_datasets
 
 # Create DataLoaders
-def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_samples=None):
+def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_samples=None, max_length=1024, specific_dataset=None):
     """
     Create DataLoader objects for the loaded datasets
     
@@ -501,14 +540,21 @@ def get_dataloaders(batch_size=8, task_mode=None, force_refresh=False, max_sampl
                   If None, use the global TASK_MODE.
         force_refresh: If True, reprocess datasets even if cached versions exist
         max_samples: Maximum number of samples to use per dataset (for memory constraints)
+        max_length: Maximum sequence length for all examples
+        specific_dataset: If provided, only load this specific dataset
     
     Returns:
         Dictionary of DataLoader objects
     """
-    datasets = load_datasets(task_mode, force_refresh, max_samples)
+    datasets = load_datasets(task_mode, force_refresh, max_samples, max_length)
     dataloaders = {}
     
     for name, dataset in datasets.items():
+        # Skip if a specific dataset is requested and this isn't it
+        if specific_dataset is not None and name != specific_dataset:
+            print(f"Skipping dataset {name} as only {specific_dataset} was requested")
+            continue
+            
         dataloaders[name] = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -614,6 +660,10 @@ def parse_args():
                         help='Clear disk cache for datasets')
     parser.add_argument('--max_samples', type=int, default=None,
                         help='Maximum number of samples to use per dataset (for memory constraints)')
+    parser.add_argument('--max_length', type=int, default=1024,
+                        help='Maximum sequence length for all examples')
+    parser.add_argument('--specific_dataset', type=str, default=None,
+                        help='Only load this specific dataset')
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -632,7 +682,9 @@ if __name__ == "__main__":
     dataloaders = get_dataloaders(
         batch_size=args.batch_size,
         force_refresh=args.force_refresh,
-        max_samples=args.max_samples
+        max_samples=args.max_samples,
+        max_length=args.max_length,
+        specific_dataset=args.specific_dataset
     )
     
     # Print sample from each dataset
