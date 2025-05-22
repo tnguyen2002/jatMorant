@@ -374,25 +374,25 @@ def get_dataloaders(batch_size=8, task_mode=None):
     
     return dataloaders
 
-# Placeholder for rule-based reward function integration
-def get_reward_function():
-    try:
-        # Import the rule-based reward function
-        from reward_score.countdown import calculate_score
+# # Placeholder for rule-based reward function integration
+# def get_reward_function():
+#     try:
+#         # Import the rule-based reward function
+#         from reward_score.countdown import calculate_score
         
-        def countdown_reward(prompt, completion):
-            """Wrapper around the rule-based reward function"""
-            return calculate_score(prompt, completion)
+#         def countdown_reward(prompt, completion):
+#             """Wrapper around the rule-based reward function"""
+#             return calculate_score(prompt, completion)
         
-        return countdown_reward
-    except ImportError:
-        print("Warning: countdown reward function not found. You need to implement or import it.")
+#         return countdown_reward
+#     except ImportError:
+#         print("Warning: countdown reward function not found. You need to implement or import it.")
         
-        def dummy_reward(prompt, completion):
-            """Dummy reward function"""
-            return 0.0
+#         def dummy_reward(prompt, completion):
+#             """Dummy reward function"""
+#             return 0.0
         
-        return dummy_reward
+#         return dummy_reward
 
 # Function to create on-policy preference dataset for DPO (to be used after SFT training)
 def create_dpo_dataset(sft_model, tokenizer, prompts_dataset, temperature=0.7, top_p=0.9):
