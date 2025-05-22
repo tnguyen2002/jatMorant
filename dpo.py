@@ -115,33 +115,33 @@ class DPOTrainer:
         Returns:
             Log probabilities of the sequence
         """
-        with torch.no_grad():
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                return_dict=True,
-            )
-            logits = outputs.logits
-            
-            # Shift logits and input_ids for next token prediction
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_input_ids = input_ids[..., 1:].contiguous()
-            
-            # Get log probabilities
-            log_probs = F.log_softmax(shift_logits, dim=-1)
-            
-            # Gather log probs of the target tokens
-            log_probs_token = log_probs.gather(
-                -1, shift_input_ids.unsqueeze(-1)
-            ).squeeze(-1)
-            
-            # Create a mask that ignores padding tokens
-            mask = (shift_input_ids != 0).float()
-            
-            # Compute sequence log probs by summing token log probs
-            seq_log_probs = (log_probs_token * mask).sum(-1) / mask.sum(-1)
-            
-            return seq_log_probs
+        # with torch.no_grad():
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+        )
+        logits = outputs.logits
+        
+        # Shift logits and input_ids for next token prediction
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_input_ids = input_ids[..., 1:].contiguous()
+        
+        # Get log probabilities
+        log_probs = F.log_softmax(shift_logits, dim=-1)
+        
+        # Gather log probs of the target tokens
+        log_probs_token = log_probs.gather(
+            -1, shift_input_ids.unsqueeze(-1)
+        ).squeeze(-1)
+        
+        # Create a mask that ignores padding tokens
+        mask = (shift_input_ids != 0).float()
+        
+        # Compute sequence log probs by summing token log probs
+        seq_log_probs = (log_probs_token * mask).sum(-1) / mask.sum(-1)
+        
+        return seq_log_probs
     
     def dpo_loss(self, policy_chosen_logps, policy_rejected_logps, 
                  reference_chosen_logps, reference_rejected_logps):
