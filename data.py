@@ -158,8 +158,8 @@ def tokenize_ultrafeedback(example):
 
 # Tokenization for SmolTalk SFT dataset
 # Modified to extract only the first user and assistant message from each conversation
-# and truncate from the completion side while using the 95th percentile length
-def tokenize_smoltalk(example, max_seq_length):
+# and explicitly limit to 256 tokens for input and 1024 tokens for output
+def tokenize_smoltalk(example, max_seq_length=None):
     # SmolTalk dataset contains a list of messages in the 'messages' field
     # Each message has 'content' and 'role' fields
     # We want to extract only the first user and assistant message
@@ -177,34 +177,24 @@ def tokenize_smoltalk(example, max_seq_length):
         prompt = example.get("prompt", example.get("instruction", ""))
         response = example.get("response", example.get("output", ""))
     
-    # Tokenize prompt (we preserve this completely)
-    prompt_tokens = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+    # Tokenize prompt (limit to 256 tokens)
+    prompt_tokens = tokenizer(prompt, add_special_tokens=True, truncation=True, max_length=256)["input_ids"]
     prompt_len = len(prompt_tokens)
     
-    # Calculate remaining tokens for response
-    response_max_len = max_seq_length - prompt_len
-    response_max_len = max(0, response_max_len)  # Ensure it's not negative
+    # Tokenize response (limit to 1024 tokens)
+    response_tokens = tokenizer(response, add_special_tokens=False, truncation=True, max_length=1024)["input_ids"]
     
-    # Tokenize response with truncation
-    response_tokens = tokenizer(response, add_special_tokens=False)["input_ids"]
-    if len(response_tokens) > response_max_len:
-        response_tokens = response_tokens[:response_max_len]
+    # Total sequence length
+    total_seq_length = prompt_len + len(response_tokens)
     
     # Combine into full sequence
     input_ids = prompt_tokens + response_tokens
     
     # Create attention mask
-    attention_mask = [1] * len(input_ids)
-    
-    # Pad to max_length
-    padding_length = max_seq_length - len(input_ids)
-    if padding_length > 0:
-        input_ids = input_ids + [tokenizer.pad_token_id] * padding_length
-        attention_mask = attention_mask + [0] * padding_length
+    attention_mask = [1] * total_seq_length
     
     # Create loss mask (0 for prompt tokens, 1 for response tokens)
-    loss_mask = [0] * prompt_len + [1] * min(len(response_tokens), max_seq_length - prompt_len)
-    loss_mask = loss_mask + [0] * max(0, max_seq_length - len(loss_mask))
+    loss_mask = [0] * prompt_len + [1] * len(response_tokens)
     
     return {
         "prompt": prompt,
@@ -372,15 +362,12 @@ def load_sft_datasets(force_refresh=False, max_samples=None, max_length=1024):
                 print(f"Limiting SmolTalk dataset to {max_samples} examples")
                 smoltalk = smoltalk.select(range(max_samples))
             
-            # Calculate 95th percentile token length
-            dataset_max_seq_length = calculate_95th_percentile_length(smoltalk)
-            print(f"Using max sequence length of {dataset_max_seq_length} for processing")
+            print("Processing SmolTalk dataset with input=256 tokens, output=1024 tokens")
             
-            # Using a function to include max_seq_length
-            def tokenize_smoltalk_with_length(example):
-                return tokenize_smoltalk(example, dataset_max_seq_length)
+            # Process the dataset with updated tokenization function
+            smoltalk_tokenized = smoltalk.map(tokenize_smoltalk, batched=False)
             
-            smoltalk_tokenized = smoltalk.map(tokenize_smoltalk_with_length, batched=False)
+            # Use the SFTDataset class to ensure consistent length for batching
             datasets["smoltalk"] = SFTDataset(smoltalk_tokenized, max_length=max_length)
             print(f"SmolTalk dataset processed with {len(datasets['smoltalk'])} examples, using only first user-assistant pair")
             print(f"All examples padded/truncated to max_length={max_length}")
