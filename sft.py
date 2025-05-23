@@ -173,10 +173,10 @@ class SFTTrainer:
                 # Log to wandb
                 if self.use_wandb:
                     wandb.log({
-                        "loss": loss.item(),
-                        "learning_rate": lr_scheduler.get_last_lr()[0],
-                        "epoch": epoch + 1,
-                        "step": self.global_step,
+                        "train/loss": loss.item(),
+                        "train/learning_rate": lr_scheduler.get_last_lr()[0],
+                        "train/epoch": epoch + 1,
+                        "train/step": self.global_step,
                     })
                 
                 # Evaluate
@@ -186,7 +186,13 @@ class SFTTrainer:
                     logger.info(f"Evaluation loss: {eval_loss}")
                     
                     # Generate samples to see progress
-                    samples = self.generate_samples(eval_dataloader, num_samples=2)
+                    samples = self.generate_samples(
+                        eval_dataloader=eval_dataloader, 
+                        num_samples=2,
+                        max_new_tokens=200,  # Generate longer responses
+                        temperature=0.7,
+                        top_p=0.9
+                    )
                     for i, sample in enumerate(samples):
                         logger.info(f"Sample {i+1}:")
                         logger.info(f"Prompt: {sample['prompt']}")
@@ -195,14 +201,41 @@ class SFTTrainer:
                         logger.info("-" * 40)
                     
                     if self.use_wandb:
-                        wandb.log({"eval_loss": eval_loss})
-                        # Log sample generations
+                        # Log detailed validation metrics
+                        eval_metrics = {
+                            "eval/loss": eval_loss,
+                            "eval/epoch": self.current_epoch + 1,
+                            "eval/step": self.global_step,
+                            "train/loss": loss.item(),  # Current training loss for comparison
+                            "learning_rate": lr_scheduler.get_last_lr()[0]
+                        }
+                        
+                        # Add validation samples to metrics
                         for i, sample in enumerate(samples):
-                            wandb.log({
-                                f"sample_{i+1}/prompt": sample['prompt'],
-                                f"sample_{i+1}/ground_truth": sample['ground_truth'],
-                                f"sample_{i+1}/generation": sample['generation'],
+                            eval_metrics.update({
+                                f"eval_sample_{i+1}/prompt": sample['prompt'],
+                                f"eval_sample_{i+1}/ground_truth": sample['ground_truth'],
+                                f"eval_sample_{i+1}/generation": sample['generation'],
                             })
+                            
+                            # Create a wandb Table for better visualization
+                            if i == 0:  # Only create the table once
+                                if not hasattr(self, 'sample_table'):
+                                    self.sample_table = wandb.Table(columns=["step", "prompt", "ground_truth", "generation"])
+                                
+                                self.sample_table.add_data(
+                                    self.global_step,
+                                    sample['prompt'],
+                                    sample['ground_truth'],
+                                    sample['generation']
+                                )
+                                
+                                # Log the table
+                                eval_metrics.update({
+                                    "eval_samples": self.sample_table
+                                })
+                        
+                        wandb.log(eval_metrics)
                     
                     # Save only if this is the best model so far
                     if eval_loss < self.best_eval_loss:
@@ -307,13 +340,16 @@ class SFTTrainer:
         
         logger.info(f"Checkpoint saved to {output_path}")
     
-    def generate_samples(self, eval_dataloader, num_samples=3):
+    def generate_samples(self, eval_dataloader, num_samples=3, max_new_tokens=200, temperature=0.7, top_p=0.9):
         """
         Generate sample texts from validation examples to track training progress.
         
         Args:
             eval_dataloader: Validation dataloader
             num_samples: Number of samples to generate
+            max_new_tokens: Maximum number of new tokens to generate
+            temperature: Sampling temperature (higher = more random)
+            top_p: Nucleus sampling parameter (lower = more focused)
             
         Returns:
             List of dictionaries containing prompt, ground_truth, and generation
@@ -338,10 +374,10 @@ class SFTTrainer:
                 # Generate text
                 gen_output = self.model.generate(
                     input_ids=prompt_input_ids.unsqueeze(0),
-                    max_new_tokens=50,
+                    max_new_tokens=max_new_tokens,
                     do_sample=True,
-                    temperature=0.7,
-                    top_p=0.9,
+                    temperature=temperature,
+                    top_p=top_p,
                     pad_token_id=self.model.config.pad_token_id,
                     attention_mask=attention_mask[:prompt_end].unsqueeze(0),
                 )
