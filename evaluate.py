@@ -11,7 +11,7 @@ import pandas as pd
 import json
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from utils.reward_score.countdown import calculate_score
+from utils.reward_score import calculate_score
 import time
 import requests
 
